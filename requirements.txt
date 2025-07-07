@@ -1,0 +1,12 @@
+colpali-engine==0.3.1
+vidore_benchmark==4.0.0
+pdf2image
+google-generativeai
+pypdf==5.0.1
+pyvespa
+vespacli
+requests
+torch
+tqdm
+Pillow
+numpy
