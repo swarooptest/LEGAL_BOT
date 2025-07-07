@@ -1,1 +1,238 @@
+import pytesseract
+from pdf2image import convert_from_path, convert_from_bytes
+import requests
+from PIL import Image
+import io
+import logging
+from typing import List, Tuple, Optional
+import fitz  # PyMuPDF for text extraction
 
+logger = logging.getLogger(__name__)
+
+class OCREnhancedPDFProcessor:
+    """Enhanced PDF processor with OCR capabilities."""
+    
+    def __init__(self, ocr_enabled: bool = True, ocr_languages: str = 'eng'):
+        """
+        Initialize the processor.
+        
+        Args:
+            ocr_enabled: Whether to use OCR for text extraction
+            ocr_languages: Languages for OCR (e.g., 'eng', 'eng+fra', 'eng+deu')
+        """
+        self.ocr_enabled = ocr_enabled
+        self.ocr_languages = ocr_languages
+        
+        # Verify OCR setup if enabled
+        if self.ocr_enabled:
+            self._verify_ocr_setup()
+    
+    def _verify_ocr_setup(self) -> bool:
+        """Verify that Tesseract OCR is properly installed."""
+        try:
+            # Test OCR with a simple image
+            test_image = Image.new('RGB', (100, 50), color='white')
+            pytesseract.image_to_string(test_image)
+            logger.info("OCR setup verified successfully")
+            return True
+        except Exception as e:
+            logger.error(f"OCR setup verification failed: {e}")
+            logger.error("Please install Tesseract OCR: https://tesseract-ocr.github.io/tessdoc/Installation.html")
+            return False
+    
+    def get_pdf_images_and_text(self, pdf_url: str) -> Tuple[List[Image.Image], List[str]]:
+        """
+        Extract images and text from PDF with OCR support.
+        
+        Args:
+            pdf_url: URL or path to the PDF
+            
+        Returns:
+            Tuple of (images, texts) where texts include both extracted and OCR'd text
+        """
+        try:
+            # Download PDF if it's a URL
+            if pdf_url.startswith('http'):
+                response = requests.get(pdf_url)
+                response.raise_for_status()
+                pdf_bytes = response.content
+            else:
+                with open(pdf_url, 'rb') as f:
+                    pdf_bytes = f.read()
+            
+            # Convert PDF pages to images
+            images = convert_from_bytes(pdf_bytes)
+            logger.info(f"Converted PDF to {len(images)} images")
+            
+            # Extract text using multiple methods
+            texts = []
+            
+            # Method 1: Direct text extraction from PDF
+            extracted_texts = self._extract_pdf_text(pdf_bytes)
+            
+            # Method 2: OCR on images (if enabled)
+            if self.ocr_enabled:
+                ocr_texts = self._extract_ocr_text(images)
+            else:
+                ocr_texts = [""] * len(images)
+            
+            # Combine extracted and OCR'd text
+            for i, (extracted, ocr_text) in enumerate(zip(extracted_texts, ocr_texts)):
+                combined_text = self._combine_text_sources(extracted, ocr_text)
+                texts.append(combined_text)
+                logger.debug(f"Page {i+1}: Extracted={len(extracted)} chars, OCR={len(ocr_text)} chars")
+            
+            return images, texts
+            
+        except Exception as e:
+            logger.error(f"Error processing PDF: {e}")
+            raise
+    
+    def _extract_pdf_text(self, pdf_bytes: bytes) -> List[str]:
+        """Extract text directly from PDF using PyMuPDF."""
+        try:
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            texts = []
+            
+            for page_num in range(len(doc)):
+                page = doc.load_page(page_num)
+                text = page.get_text()
+                texts.append(text.strip())
+            
+            doc.close()
+            logger.info(f"Extracted text from {len(texts)} pages using PDF text extraction")
+            return texts
+            
+        except Exception as e:
+            logger.error(f"Error extracting PDF text: {e}")
+            return []
+    
+    def _extract_ocr_text(self, images: List[Image.Image]) -> List[str]:
+        """Extract text from images using OCR."""
+        if not self.ocr_enabled:
+            return [""] * len(images)
+        
+        texts = []
+        for i, image in enumerate(images):
+            try:
+                # Configure OCR parameters
+                custom_config = r'--oem 3 --psm 6 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.,!?;:()[]{}/"\'- '
+                
+                # Perform OCR
+                ocr_text = pytesseract.image_to_string(
+                    image, 
+                    lang=self.ocr_languages,
+                    config=custom_config
+                )
+                
+                texts.append(ocr_text.strip())
+                logger.debug(f"OCR completed for page {i+1}: {len(ocr_text)} characters")
+                
+            except Exception as e:
+                logger.error(f"OCR failed for page {i+1}: {e}")
+                texts.append("")
+        
+        logger.info(f"Completed OCR for {len(images)} pages")
+        return texts
+    
+    def _combine_text_sources(self, extracted_text: str, ocr_text: str) -> str:
+        """
+        Combine text from different sources intelligently.
+        
+        Args:
+            extracted_text: Text extracted directly from PDF
+            ocr_text: Text from OCR
+            
+        Returns:
+            Combined text
+        """
+        # If we have good extracted text, use it
+        if len(extracted_text.strip()) > 100:  # Arbitrary threshold
+            logger.debug("Using extracted text (sufficient content)")
+            return extracted_text
+        
+        # If extracted text is minimal but OCR found content, use OCR
+        elif len(ocr_text.strip()) > len(extracted_text.strip()):
+            logger.debug("Using OCR text (more content than extracted)")
+            return ocr_text
+        
+        # If both have content, combine them
+        elif len(extracted_text.strip()) > 0 and len(ocr_text.strip()) > 0:
+            logger.debug("Combining extracted and OCR text")
+            return f"{extracted_text}\n\n--- OCR TEXT ---\n{ocr_text}"
+        
+        # Use whatever we have
+        else:
+            return extracted_text or ocr_text
+    
+    def get_text_confidence(self, image: Image.Image) -> float:
+        """
+        Get OCR confidence score for an image.
+        
+        Args:
+            image: PIL Image
+            
+        Returns:
+            Confidence score (0-100)
+        """
+        if not self.ocr_enabled:
+            return 0.0
+        
+        try:
+            data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
+            confidences = [int(conf) for conf in data['conf'] if int(conf) > 0]
+            return sum(confidences) / len(confidences) if confidences else 0.0
+        except Exception as e:
+            logger.error(f"Error getting OCR confidence: {e}")
+            return 0.0
+    
+    def preprocess_image_for_ocr(self, image: Image.Image) -> Image.Image:
+        """
+        Preprocess image to improve OCR accuracy.
+        
+        Args:
+            image: Original PIL Image
+            
+        Returns:
+            Preprocessed PIL Image
+        """
+        try:
+            # Convert to grayscale
+            if image.mode != 'L':
+                image = image.convert('L')
+            
+            # Resize if too small (OCR works better on larger images)
+            width, height = image.size
+            if width < 1000 or height < 1000:
+                scale_factor = max(1000 / width, 1000 / height)
+                new_width = int(width * scale_factor)
+                new_height = int(height * scale_factor)
+                image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+            
+            # Enhance contrast (simple approach)
+            from PIL import ImageEnhance
+            enhancer = ImageEnhance.Contrast(image)
+            image = enhancer.enhance(1.2)
+            
+            return image
+            
+        except Exception as e:
+            logger.error(f"Error preprocessing image: {e}")
+            return image  # Return original if preprocessing fails
+
+# Usage example
+def main():
+    # Initialize with OCR enabled
+    processor = OCREnhancedPDFProcessor(ocr_enabled=True, ocr_languages='eng')
+    
+    # Process a PDF
+    pdf_url = "https://example.com/document.pdf"
+    images, texts = processor.get_pdf_images_and_text(pdf_url)
+    
+    # Check OCR confidence for each page
+    for i, (image, text) in enumerate(zip(images, texts)):
+        confidence = processor.get_text_confidence(image)
+        print(f"Page {i+1}: {len(text)} characters, OCR confidence: {confidence:.1f}%")
+
+if __name__ == "__main__":
+    main()
